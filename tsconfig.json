@@ -1,0 +1,10 @@
+{
+  "compilerOptions": {
+    "outDir": "./built",
+    "allowJs": true,
+    "target": "ESNext",
+    "module": "NodeNext",
+    "declaration": true,
+  },
+  "include": ["src"],
+}

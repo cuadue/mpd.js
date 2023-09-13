@@ -1,10 +1,11 @@
 {
-  "name": "mpd",
-  "version": "1.3.0",
+  "name": "@cuadue/mpd",
+  "version": "1.4.2",
   "description": "music player daemon client",
-  "main": "index.js",
+  "exports": "./built/index.js",
+  "types": "./built/index.d.js",
   "engines": {
-    "node": ">=0.8.0"
+    "node": ">=12.20.0"
   },
   "repository": {
     "type": "git",
@@ -19,5 +20,19 @@
     "protocol"
   ],
   "author": "Andrew Kelley <superjoe30@gmail.com>",
-  "license": "MIT"
+  "contributors": [
+    "Wesley Waugh <https://github.com/cuadue>"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.6.0",
+    "ts-node": "^10.9.1",
+    "typescript": "^5.0.4"
+  },
+  "scripts": {
+    "build": "tsc"
+  },
+  "dependencies": {
+    "tiny-typed-emitter": "^2.1.0"
+  }
 }
