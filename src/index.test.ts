@@ -15,8 +15,8 @@ ACK [5@0] {} unknown command "food"
 extra stuff...`;
 
 test('parseResponse test', () => {
-    const {content, remain} = parseResponse(mpdResponse);
-    expect(content).toEqual([
+    const {responses, remain} = parseResponse(mpdResponse);
+    expect(responses).toEqual([
         {kind: 'version', payload: '0.23.5'},
         {kind: 'data', payload: ''},
         {kind: 'data', payload:

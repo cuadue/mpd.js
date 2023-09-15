@@ -14,24 +14,43 @@ over MPD.
 
 ## Usage
 
-```js
-var mpd = require('mpd'),
-    cmd = mpd.cmd
-var client = mpd.connect({
+```ts
+import { MpdClient } from "../dist/index.js";
+
+const client = new MpdClient();
+
+client.onSystem('player', async () => {
+  const msg = await client.getStatus();
+  console.log(msg);
+});
+
+client.onSystem('mixer', async () => {
+  const msg = await client.getStatus();
+  console.log(`Volume changed to ${msg.volume}`);
+});
+
+client.on('state', (state) => {
+  if (state instanceof Error) {
+    console.log(`Something bad happened! ${state}`);
+  } else {
+    console.log(`State changed to ${state}`);
+  }
+});
+
+client.connect({
   port: 6600,
-  host: 'localhost',
+  host: 'raspberrypi.local',
 });
-client.on('ready', function() {
-  console.log("ready");
-});
-client.on('system', function(name) {
-  console.log("update", name);
-});
-client.on('system-player', function() {
-  client.sendCommand(cmd("status", []), function(err, msg) {
-    if (err) throw err;
-    console.log(msg);
-  });
+
+const msg = await client.getStatus();
+console.log(`status: ${JSON.stringify(msg)}`);
+
+client.onReady(async () => {
+  console.log("MPD Client is connected");
+
+  while (true) {
+    await new Promise<void>(resolve => setTimeout(resolve, 1000));
+  }
 });
 ```
 
@@ -39,42 +58,35 @@ client.on('system-player', function() {
 
 See also the [MPD Protocol Documentation](http://www.musicpd.org/doc/protocol/).
 
+Make a new client with `const client = new MpdClient()`.
+
 ### Functions
 
-#### mpd.cmd(name, args)
+#### client.connect(options)
 
-Convert name/args pair into a Command.
+Connects to the MPD server.
 
-#### mpd.connect(options)
+#### async client.sendCommand(command)
 
-Connects and returns a client.
+`command` can be either:
+* a string `commandName` for a command with no arguments, or
+* an array `[commandName, arg1, ...]` for a command with arguments
 
-#### mpd.parseKeyValueMessage(msg)
+#### async client.sendCommands(commandList)
+
+Send multiple commands in one batch
+
+#### parseKeyValueMessage(msg)
 
 `msg`: a string which contains an MPD response.
 Returns an object.
 
-#### client.sendCommand(command, callback)
-
-`command` can be a `MpdClient.Command` or a string.
-
-#### client.sendCommands(commandList, callback)
-
 ### Events
 
-#### error(err)
+#### state(arg)
 
-#### end
-
-The connection is closed.
-
-#### connect
-
-A socket connection has been made.
-
-#### ready
-
-The mpd server is ready to accept commands.
+Whenever the state of the client changes. `arg` is
+an `Error` instance, the string `connecting` or the string `ready`.
 
 #### system(systemName)
 
@@ -95,6 +107,13 @@ A system has updated. `systemName` is one of:
   * `message` - a message was received on a channel this client is subscribed
     to; this event is only emitted when the queue is empty
 
-#### system-*
+### Event Helper Functions
 
-See above event. Each system name has its own event as well.
+#### client.onReady(callback)
+
+Callback is called when the client is ready to receive commands. This is called
+again after reconnecting, if there was an error previously.
+
+#### client.onSystem(name, callback)
+
+Callback is called with no args when the subsystem having `name` changes.

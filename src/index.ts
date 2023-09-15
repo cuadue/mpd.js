@@ -1,4 +1,3 @@
-import {strict as assert} from 'assert';
 import * as  net from 'node:net';
 import {TypedEmitter} from 'tiny-typed-emitter';
 
@@ -10,22 +9,21 @@ const defaultConnectOpts: ConnectOptions = {
   port: 6600
 };
 
+export type State = Error | 'connecting' | 'ready';
 interface MpdClientEvents {
-  connect: () => void;
   ready: () => void;
-  end: () => void;
+  state: (state: State) => void;
   system: (name: string) => void;
-  error: (err: Error) => void;
 }
 
 export type MessageHandler = (err?: Error, msg?: any) => any;
 export type Command = string | [string, ...string[]];
 export type KeyValuePairs = {[key: string]: string};
 
-type Response = {kind: 'error' | 'version' | 'data', payload: string};
+type MpdResponse = {kind: 'error' | 'version' | 'data', payload: string};
 
-export const parseResponse = (data: string): {content: Array<Response>, remain: string} => {
-  const content: Array<Response> = [];
+export const parseResponse = (data: string): {responses: Array<MpdResponse>, remain: string} => {
+  const responses: Array<MpdResponse> = [];
   const lines = data.split('\n');
   var beginLine = 0;
 
@@ -36,89 +34,92 @@ export const parseResponse = (data: string): {content: Array<Response>, remain: 
     const error = line.match(/^ACK \[.*] {.*} (.+)/);
 
     if (version) {
-      content.push({kind: 'version', payload: version[1]});
+      responses.push({kind: 'version', payload: version[1]});
       beginLine = i + 1;
     } else if (error) {
-      content.push({kind: 'error', payload: error[1]});
+      responses.push({kind: 'error', payload: error[1]});
       beginLine = i + 1;
     } else if (line === 'OK') {
-      content.push({kind: 'data', payload: lines.slice(beginLine, i).join('\n')});
+      responses.push({kind: 'data', payload: lines.slice(beginLine, i).join('\n')});
       beginLine = i + 1;
     }
   }
 
-  return {content, remain: lines.slice(beginLine).join('\n')};
+  return {responses, remain: lines.slice(beginLine).join('\n')};
 }
 
 export class MpdClient extends TypedEmitter<MpdClientEvents> {
   private buffer: string = '';
   private msgHandlerQueue: Array<MessageHandler> = [];
-  private idling: Boolean = false;
   private socket?: net.Socket = null;
+  private restartIdle: boolean = true;
 
   connect(options: ConnectOptions = defaultConnectOpts) {
+    this.emit('state', 'connecting');
     this.socket = net.connect(options, () => {
-      console.log('MPD client ready and connected to ' + options.host + ':' + options.port);
-
-      this.emit('connect')
+      console.log('MPD client connected to ' + options.host + ':' + options.port);
     });
 
     this.socket.setEncoding('utf8');
     this.socket.on('data', (data) => this.receive(data));
-    this.socket.on('close', () => this.emit('end'));
-    this.socket.on('error', (err) => this.emit('error', err));
+    this.socket.on('close', () => {
+      this.emit('state', new Error('Socket unexpectedly closed'));
+      console.log('Reconnecting because socket closed');
+      this.connect(options);
+    });
+    this.socket.on('error', (err) => {
+      console.log(`Reconnecting due to error: ${err}`);
+      this.emit('state', err);
+      this.connect(options);
+    });
   }
 
   private receive(data: Buffer) {
-    const {content, remain} = parseResponse(this.buffer + data);
+    const {responses, remain} = parseResponse(this.buffer + data);
     this.buffer = remain;
 
-    content.forEach(response => {
-      switch (response.kind) {
-        case 'error':
-          this.handleMessage(new Error(response.payload));
-          break;
+    const dispatch = {
+      version: (payload: string) => {
+        // The server sends the version upon connection.
+        console.log(`MPD Server Version ${payload}`)
+        this.emit('ready');
+        this.emit('state', 'ready');
+        this.idle();
+      },
+      error: (payload: string) => this.handleMessage(new Error(payload), null),
+      data: (payload: string) => this.handleMessage(null, payload),
+    };
 
-        case 'version':
-          // When the client connects to the server, the server will answer with
-          // the following line: OK MPD version
-          console.log(`MPD Server Version ${response.payload}`)
-          this.setupIdling();
-          this.emit('ready');
-          break;
-
-        case 'data':
-          if (this.idling) {
-            console.log(`Handling idle results ${response.payload}`);
-            this.handleIdleResults(response.payload);
-            this.idling = false;
-          } else {
-            console.log(`Handling message '${response.payload}'`);
-            this.handleMessage(null, response.payload);
-          }
-
-      }
-    });
-  };
+    responses.forEach(response => dispatch[response.kind](response.payload));
+  }
 
   private handleMessage(err?: Error, msg?: string) {
     var handler = this.msgHandlerQueue.shift();
-    if (handler) {
-      handler(err, msg);
-    }
+    handler(err, msg);
   };
 
-  private setupIdling() {
-    assert.ok(!this.idling);
-    this.socket.write('idle\n');
-    this.idling = true;
+  private idle() {
+    this.send('idle').then((msg) => {
+      msg.split("\n").forEach((line: string) => {
+        const m = /changed: (\w+)/.exec(line);
+        if (m) {
+          this.emit('system', m[1]);
+        }
+      });
+      if (this.restartIdle) {
+        this.idle();
+      }
+    });
   }
 
   async sendCommand(command: Command): Promise<string> {
-    assert.ok(this.idling);
-    this.send("noidle");
+    // Write noidle directly to the socket to cause the server to 
+    // respond, which will resolve the pending idle request.
+    this.restartIdle = false;
+    this.socket.write('noidle\n');
     const ret = await this.send(serializeCommand(command));
-    this.setupIdling();
+    this.restartIdle = true;
+    this.idle();
     return ret;
   };
 
@@ -129,30 +130,31 @@ export class MpdClient extends TypedEmitter<MpdClientEvents> {
       "command_list_end"].join('\n'));
   };
 
-  private handleIdleResults(msg: string) {
-    msg.split("\n").forEach(function(line: string) {
-      const m = /changed: (\w+)/.exec(line);
-      if (m) {
-        this.emit('system', m[1]);
-      }
-    });
-  };
-
   private async send(data: string): Promise<string> {
-    console.log(`send '${data}'`);
     this.socket.write(data.trimEnd() + '\n');
     return new Promise((resolve, reject) => {
       this.msgHandlerQueue.push((err?: Error, msg?: string) => {
         if (err != null) reject(err);
         resolve(msg);
       });
-      console.log(`Message handler queue ${this.msgHandlerQueue.length}`);
     });
   };
 
   async getStatus(): Promise<KeyValuePairs> {
     const msg = await this.sendCommand('status');
     return parseKeyValueMessage(msg);
+  }
+
+  private onEventWithName(event: keyof MpdClientEvents, name: string, handler: () => void) {
+    this.on(event, (n: string) => (n === name) && handler());
+  }
+
+  onReady(handler: () => void) {
+    this.onEventWithName('state', 'ready', handler);
+  }
+
+  onSystem(name: string, handler: () => void) {
+    this.onEventWithName('system', name, handler);
   }
 }
 

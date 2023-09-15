@@ -2,11 +2,21 @@ import { MpdClient } from "../dist/index.js";
 
 const client = new MpdClient();
 
-client.on('system', async (name) => {
-  console.log("update", name);
-  if (name === 'player') {
-    const msg = await client.getStatus();
-    console.log(msg);
+client.onSystem('player', async () => {
+  const msg = await client.getStatus();
+  console.log(msg);
+});
+
+client.onSystem('mixer', async () => {
+  const msg = await client.getStatus();
+  console.log(`Volume changed to ${msg.volume}`);
+});
+
+client.on('state', (state) => {
+  if (state instanceof Error) {
+    console.log(`Something bad happened! ${state}`);
+  } else {
+    console.log(`State changed to ${state}`);
   }
 });
 
@@ -15,16 +25,14 @@ client.connect({
   host: 'raspberrypi.local',
 });
 
-const main = async () => {
-  await new Promise<void>(resolve => client.on('ready', resolve));
-  console.log("MPD Client is connected");
+client.getStatus().then((msg) => {
+  console.log(`status: ${JSON.stringify(msg)}`);
+});
 
-  const msg = await client.getStatus();
-  console.log(`status: ${msg}`);
+client.onReady(async () => {
+  console.log("MPD Client is connected");
 
   while (true) {
     await new Promise<void>(resolve => setTimeout(resolve, 1000));
   }
-}
-
-main()
+});

@@ -1,6 +1,6 @@
 {
   "name": "@cuadue/mpd",
-  "version": "1.4.2",
+  "version": "2.0.0",
   "description": "music player daemon client",
   "exports": "./dist/index.js",
   "types": "./dist/index.d.js",
@@ -9,7 +9,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git@github.com:andrewrk/mpd.js.git"
+    "url": "git@github.com:cuadue/mpd.js.git"
   },
   "keywords": [
     "mpd",
