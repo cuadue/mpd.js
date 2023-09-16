@@ -1,3 +1,4 @@
+import {strict as assert} from 'node:assert';
 import * as  net from 'node:net';
 import {TypedEmitter} from 'tiny-typed-emitter';
 
@@ -36,12 +37,15 @@ export const parseResponse = (data: string): {responses: Array<MpdResponse>, rem
     if (version) {
       responses.push({kind: 'version', payload: version[1]});
       beginLine = i + 1;
+      break;
     } else if (error) {
       responses.push({kind: 'error', payload: error[1]});
       beginLine = i + 1;
+      break;
     } else if (line === 'OK') {
       responses.push({kind: 'data', payload: lines.slice(beginLine, i).join('\n')});
       beginLine = i + 1;
+      break;
     }
   }
 
@@ -52,9 +56,10 @@ export class MpdClient extends TypedEmitter<MpdClientEvents> {
   private buffer: string = '';
   private msgHandlerQueue: Array<MessageHandler> = [];
   private socket?: net.Socket = null;
-  private restartIdle: boolean = true;
+  private idlePromise?: Promise<void> = null;
+  private restartIdle: boolean = false;
 
-  connect(options: ConnectOptions = defaultConnectOpts) {
+  async connect(options: ConnectOptions = defaultConnectOpts) {
     this.emit('state', 'connecting');
     this.socket = net.connect(options, () => {
       console.log('MPD client connected to ' + options.host + ':' + options.port);
@@ -72,6 +77,13 @@ export class MpdClient extends TypedEmitter<MpdClientEvents> {
       this.emit('state', err);
       this.connect(options);
     });
+
+    return new Promise<void>((resolve) => {
+      this.on('ready', async () => {
+        this.idle();
+        resolve();
+      });
+    });
   }
 
   private receive(data: Buffer) {
@@ -80,16 +92,13 @@ export class MpdClient extends TypedEmitter<MpdClientEvents> {
 
     const dispatch = {
       version: (payload: string) => {
-        // The server sends the version upon connection.
         console.log(`MPD Server Version ${payload}`)
-        this.emit('ready');
         this.emit('state', 'ready');
-        this.idle();
+        this.emit('ready');
       },
       error: (payload: string) => this.handleMessage(new Error(payload), null),
       data: (payload: string) => this.handleMessage(null, payload),
     };
-
     responses.forEach(response => dispatch[response.kind](response.payload));
   }
 
@@ -99,7 +108,8 @@ export class MpdClient extends TypedEmitter<MpdClientEvents> {
   };
 
   private idle() {
-    this.send('idle').then((msg) => {
+    this.idlePromise ||= this.send('idle').then((msg) => {
+      this.idlePromise = null;
       msg.split("\n").forEach((line: string) => {
         const m = /changed: (\w+)/.exec(line);
         if (m) {
@@ -115,15 +125,22 @@ export class MpdClient extends TypedEmitter<MpdClientEvents> {
   async sendCommand(command: Command): Promise<string> {
     // Write noidle directly to the socket to cause the server to 
     // respond, which will resolve the pending idle request.
-    this.restartIdle = false;
-    this.socket.write('noidle\n');
+    if (this.idlePromise) {
+      this.restartIdle = false;
+      this.socket.write('noidle\n');
+      await this.idlePromise;
+    }
+    assert.equal(this.idlePromise, null);
     const ret = await this.send(serializeCommand(command));
-    this.restartIdle = true;
-    this.idle();
+    if (!this.idlePromise) {
+      this.restartIdle = true;
+      this.idle();
+    }
+    assert.notEqual(this.idlePromise, null);
     return ret;
   };
 
-  async sendCommands(commandList: Array<Command>) {
+  async sendCommands(commandList: Array<Command>): Promise<string> {
     return this.sendCommand(
       ["command_list_begin",
       ...commandList.map(serializeCommand),
@@ -145,6 +162,11 @@ export class MpdClient extends TypedEmitter<MpdClientEvents> {
     return parseKeyValueMessage(msg);
   }
 
+  async getPlaylistInfo(): Promise<KeyValuePairs> {
+    const msg = await this.sendCommand('playlistinfo');
+    return parseKeyValueMessage(msg);
+  }
+
   private onEventWithName(event: keyof MpdClientEvents, name: string, handler: () => void) {
     this.on(event, (n: string) => (n === name) && handler());
   }
@@ -162,7 +184,6 @@ function argEscape(arg){
   // replace all " with \"
   return '"' + arg.toString().replace(/"/g, '\\"') + '"';
 }
-
 
 function serializeCommand(command: Command): string {
   if (Array.isArray(command)) {
