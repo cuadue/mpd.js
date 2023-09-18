@@ -61,6 +61,10 @@ export class MpdClient extends TypedEmitter<MpdClientEvents> {
 
   async connect(options: ConnectOptions = defaultConnectOpts) {
     this.emit('state', 'connecting');
+    if (this.socket) {
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      this.socket.destroy();
+    }
     this.socket = net.connect(options, () => {
       console.log('MPD client connected to ' + options.host + ':' + options.port);
     });
