@@ -1,4 +1,5 @@
 import {strict as assert} from 'node:assert';
+import { log } from 'node:console';
 import * as  net from 'node:net';
 import {TypedEmitter} from 'tiny-typed-emitter';
 
@@ -17,7 +18,11 @@ interface MpdClientEvents {
   system: (name: string) => void;
 }
 
-export type MessageHandler = (err?: Error, msg?: any) => any;
+export type MessageHandler = {
+  isIdle: boolean
+  func: (err?: Error, msg?: string) => any
+};
+
 export type Command = string | [string, ...string[]];
 export type KeyValuePairs = {[key: string]: string};
 
@@ -37,15 +42,12 @@ export const parseResponse = (data: string): {responses: Array<MpdResponse>, rem
     if (version) {
       responses.push({kind: 'version', payload: version[1]});
       beginLine = i + 1;
-      break;
     } else if (error) {
       responses.push({kind: 'error', payload: error[1]});
       beginLine = i + 1;
-      break;
     } else if (line === 'OK') {
       responses.push({kind: 'data', payload: lines.slice(beginLine, i).join('\n')});
       beginLine = i + 1;
-      break;
     }
   }
 
@@ -56,8 +58,6 @@ export class MpdClient extends TypedEmitter<MpdClientEvents> {
   private buffer: string = '';
   private msgHandlerQueue: Array<MessageHandler> = [];
   private socket?: net.Socket = null;
-  private idlePromise?: Promise<void> = null;
-  private restartIdle: boolean = false;
 
   async connect(options: ConnectOptions = defaultConnectOpts) {
     this.emit('state', 'connecting');
@@ -70,7 +70,7 @@ export class MpdClient extends TypedEmitter<MpdClientEvents> {
     });
 
     this.socket.setEncoding('utf8');
-    this.socket.on('data', (data) => this.receive(data));
+    this.socket.on('data', (data) => this.receive(data.toString()));
     this.socket.on('close', () => {
       this.emit('state', new Error('Socket unexpectedly closed'));
       console.log('Reconnecting because socket closed');
@@ -90,7 +90,7 @@ export class MpdClient extends TypedEmitter<MpdClientEvents> {
     });
   }
 
-  private receive(data: Buffer) {
+  private receive(data: string) {
     const {responses, remain} = parseResponse(this.buffer + data);
     this.buffer = remain;
 
@@ -107,41 +107,28 @@ export class MpdClient extends TypedEmitter<MpdClientEvents> {
   }
 
   private handleMessage(err?: Error, msg?: string) {
-    var handler = this.msgHandlerQueue.shift();
-    handler(err, msg);
+    const {func} = this.msgHandlerQueue.shift();
+    func(err, msg);
+
+    if (this.msgHandlerQueue.length === 0) {
+      this.idle();
+    }
   };
 
   private idle() {
-    this.idlePromise ||= this.send('idle').then((msg) => {
-      this.idlePromise = null;
+    console.log('idling');
+    this.send('idle').then((msg) => {
       msg.split("\n").forEach((line: string) => {
         const m = /changed: (\w+)/.exec(line);
         if (m) {
           this.emit('system', m[1]);
         }
       });
-      if (this.restartIdle) {
-        this.idle();
-      }
     });
   }
 
   async sendCommand(command: Command): Promise<string> {
-    // Write noidle directly to the socket to cause the server to 
-    // respond, which will resolve the pending idle request.
-    if (this.idlePromise) {
-      this.restartIdle = false;
-      this.socket.write('noidle\n');
-      await this.idlePromise;
-    }
-    assert.equal(this.idlePromise, null);
-    const ret = await this.send(serializeCommand(command));
-    if (!this.idlePromise) {
-      this.restartIdle = true;
-      this.idle();
-    }
-    assert.notEqual(this.idlePromise, null);
-    return ret;
+    return this.send(serializeCommand(command));
   };
 
   async sendCommands(commandList: Array<Command>): Promise<string> {
@@ -152,12 +139,27 @@ export class MpdClient extends TypedEmitter<MpdClientEvents> {
   };
 
   private async send(data: string): Promise<string> {
-    this.socket.write(data.trimEnd() + '\n');
+    data = data.trim();
+    const isIdle = data === 'idle';
+
+    if (this.msgHandlerQueue[0]?.isIdle) {
+      this.socket.write('noidle\n');
+    }
+    this.socket.write(data + '\n');
+
     return new Promise((resolve, reject) => {
-      this.msgHandlerQueue.push((err?: Error, msg?: string) => {
-        if (err != null) reject(err);
-        resolve(msg);
+      this.msgHandlerQueue.push({
+        isIdle,
+        func: (err?: Error, msg?: string) => {
+          if (err != null) reject(err);
+          resolve(msg);
+        },
       });
+      if (!isIdle) {
+        setTimeout(() => {
+          reject(new Error('Timed out: command ' + data));
+        }, 1000);
+      }
     });
   };
 
