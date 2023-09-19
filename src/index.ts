@@ -1,9 +1,5 @@
-import {strict as assert} from 'node:assert';
-import { log } from 'node:console';
 import * as  net from 'node:net';
 import {TypedEmitter} from 'tiny-typed-emitter';
-
-const MPD_SENTINEL = /^(OK|ACK|list_OK) ?(.*)$/m;
 
 export type ConnectOptions = {host: string, port: number};
 const defaultConnectOpts: ConnectOptions = {
@@ -12,10 +8,11 @@ const defaultConnectOpts: ConnectOptions = {
 };
 
 export type State = Error | 'connecting' | 'ready';
+
 interface MpdClientEvents {
   ready: () => void;
-  state: (state: State) => void;
-  system: (name: string) => void;
+  stateChanged: (state: State) => void;
+  subsystemsChanged: (names: Array<string>) => void;
 }
 
 export type MessageHandler = {
@@ -60,7 +57,7 @@ export class MpdClient extends TypedEmitter<MpdClientEvents> {
   private socket?: net.Socket = null;
 
   async connect(options: ConnectOptions = defaultConnectOpts) {
-    this.emit('state', 'connecting');
+    this.emit('stateChanged', 'connecting');
     if (this.socket) {
       await new Promise((resolve) => setTimeout(resolve, 1000));
       this.socket.destroy();
@@ -72,13 +69,13 @@ export class MpdClient extends TypedEmitter<MpdClientEvents> {
     this.socket.setEncoding('utf8');
     this.socket.on('data', (data) => this.receive(data.toString()));
     this.socket.on('close', () => {
-      this.emit('state', new Error('Socket unexpectedly closed'));
+      this.emit('stateChanged', new Error('Socket unexpectedly closed'));
       console.log('Reconnecting because socket closed');
       this.connect(options);
     });
     this.socket.on('error', (err) => {
       console.log(`Reconnecting due to error: ${err}`);
-      this.emit('state', err);
+      this.emit('stateChanged', err);
       this.connect(options);
     });
 
@@ -97,7 +94,7 @@ export class MpdClient extends TypedEmitter<MpdClientEvents> {
     const dispatch = {
       version: (payload: string) => {
         console.log(`MPD Server Version ${payload}`)
-        this.emit('state', 'ready');
+        this.emit('stateChanged', 'ready');
         this.emit('ready');
       },
       error: (payload: string) => this.handleMessage(new Error(payload), null),
@@ -116,14 +113,13 @@ export class MpdClient extends TypedEmitter<MpdClientEvents> {
   };
 
   private idle() {
-    console.log('idling');
     this.send('idle').then((msg) => {
-      msg.split("\n").forEach((line: string) => {
-        const m = /changed: (\w+)/.exec(line);
-        if (m) {
-          this.emit('system', m[1]);
-        }
-      });
+      this.emit('subsystemsChanged', msg.split("\n")
+        .map(line => {
+          const m = /changed: (\w+)/.exec(line);
+          return m ? m[1] : null;
+        })
+        .filter(system => system != null));
     });
   }
 
@@ -163,26 +159,10 @@ export class MpdClient extends TypedEmitter<MpdClientEvents> {
     });
   };
 
-  async getStatus(): Promise<KeyValuePairs> {
-    const msg = await this.sendCommand('status');
-    return parseKeyValueMessage(msg);
-  }
 
   async getPlaylistInfo(): Promise<KeyValuePairs> {
     const msg = await this.sendCommand('playlistinfo');
     return parseKeyValueMessage(msg);
-  }
-
-  private onEventWithName(event: keyof MpdClientEvents, name: string, handler: () => void) {
-    this.on(event, (n: string) => (n === name) && handler());
-  }
-
-  onReady(handler: () => void) {
-    this.onEventWithName('state', 'ready', handler);
-  }
-
-  onSystem(name: string, handler: () => void) {
-    this.onEventWithName('system', name, handler);
   }
 }
 
